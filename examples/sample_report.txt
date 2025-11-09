@@ -1,0 +1,303 @@
+================================================================================
+  LINUX SECURITY AUDIT REPORT WITH CVE ANALYSIS
+================================================================================
+
+Audit Date: 2024-11-09 14:30:22
+Script Version: 2.0.0
+Hostname: ubuntu-server-01
+Operating System: Ubuntu 22.04
+OS Family: Debian
+Package Manager: apt
+Privileged Mode: true
+
+================================================================================
+1. SYSTEM INFORMATION
+================================================================================
+
+--- Operating System Information ---
+
+OS: Ubuntu 22.04.3 LTS
+Kernel: 5.15.0-89-generic
+Architecture: x86_64
+Uptime: 45 days
+
+--- System Updates Status ---
+
+Security updates available: 5
+Total updates available: 12
+
+[HIGH] Security Updates Available
+Description: 5 security updates are available for installation
+Remediation: Run 'apt-get update && apt-get upgrade' to install security updates
+
+================================================================================
+2. USER AND AUTHENTICATION SECURITY
+================================================================================
+
+--- Root User Accounts ---
+
+Root users (UID 0): 1
+  - root
+
+--- Empty Password Check ---
+
+No users with empty passwords found.
+
+--- Sudo Configuration ---
+
+[INFO] Sudo Configuration Review
+Description: Sudo is configured - review /etc/sudoers for proper restrictions
+
+--- Active User Sessions ---
+
+Currently logged in users: 2
+  - admin (tty1)
+  - sysadmin (pts/0)
+
+================================================================================
+3. NETWORK SECURITY CONFIGURATION
+================================================================================
+
+--- Open Ports ---
+
+Listening ports detected:
+  - 22/tcp (ssh)
+  - 80/tcp (http)
+  - 443/tcp (https)
+  - 3306/tcp (mysql)
+
+[MEDIUM] Database Port Exposed
+Description: MySQL is listening on all interfaces (0.0.0.0:3306)
+Remediation: Bind MySQL to localhost only in /etc/mysql/my.cnf
+
+--- SSH Configuration ---
+
+SSH running: Yes
+PermitRootLogin: yes
+
+[HIGH] SSH PermitRootLogin Enabled
+Description: SSH allows direct root login
+Remediation: Set 'PermitRootLogin no' in /etc/ssh/sshd_config
+
+--- Network Interfaces ---
+
+Active interfaces: 2
+  - eth0: 192.168.1.100
+  - lo: 127.0.0.1
+
+================================================================================
+4. FILE SYSTEM & PERMISSIONS AUDIT
+================================================================================
+
+--- SUID/SGID Files ---
+
+SUID files found: 45
+SGID files found: 23
+
+--- World-Writable Files ---
+
+[MEDIUM] World-Writable Files Detected
+Description: 3 world-writable files found in system directories
+Remediation: Review and remove write permissions: chmod o-w <file>
+
+--- Critical File Permissions ---
+
+/etc/passwd: 644 (OK)
+/etc/shadow: 640 (OK)
+/etc/ssh/sshd_config: 600 (OK)
+
+================================================================================
+5. SERVICE & PROCESS ANALYSIS
+================================================================================
+
+--- Running Services ---
+
+Active services: 45
+  - ssh.service
+  - nginx.service
+  - mysql.service
+  - cron.service
+  - systemd-journald.service
+
+[LOW] Unnecessary Service Running
+Description: cups.service is running but may not be needed on a server
+Remediation: Disable if not required: systemctl disable --now cups.service
+
+================================================================================
+6. PACKAGE MANAGEMENT & VULNERABILITY DETECTION
+================================================================================
+
+--- Installed Packages ---
+
+Total packages installed: 1,247
+
+--- Security Updates ---
+
+Available security updates: 5
+  - openssl (1.1.1f-1ubuntu2.19 -> 1.1.1f-1ubuntu2.20)
+  - nginx (1.18.0-0ubuntu1.4 -> 1.18.0-0ubuntu1.5)
+  - mysql-server (8.0.35-0ubuntu0.22.04.1 -> 8.0.36-0ubuntu0.22.04.1)
+  - linux-image-generic (5.15.0.88.86 -> 5.15.0.89.87)
+  - systemd (249.11-0ubuntu3.10 -> 249.11-0ubuntu3.11)
+
+--- CVE Vulnerability Scan ---
+
+[CRITICAL] CVE-2024-0567 | CVSS: 9.8 | Package: openssl
+  Description: Remote code execution vulnerability in OpenSSL
+  Fixed Version: 1.1.1f-1ubuntu2.20
+  Remediation: sudo apt-get install --only-upgrade openssl
+
+[HIGH] CVE-2024-1234 | CVSS: 8.1 | Package: nginx
+  Description: HTTP request smuggling in nginx
+  Fixed Version: 1.18.0-0ubuntu1.5
+  Remediation: sudo apt-get install --only-upgrade nginx
+
+[HIGH] CVE-2024-5678 | CVSS: 7.5 | Package: mysql-server
+  Description: Authentication bypass in MySQL
+  Fixed Version: 8.0.36-0ubuntu0.22.04.1
+  Remediation: sudo apt-get install --only-upgrade mysql-server
+
+[MEDIUM] CVE-2024-9012 | CVSS: 6.5 | Package: systemd
+  Description: Privilege escalation in systemd
+  Fixed Version: 249.11-0ubuntu3.11
+  Remediation: sudo apt-get install --only-upgrade systemd
+
+================================================================================
+7. KERNEL SECURITY & CVE ASSESSMENT
+================================================================================
+
+--- Kernel Information ---
+
+Kernel version: 5.15.0-89-generic
+Kernel security: AppArmor enabled
+
+[INFO] Kernel Security Features
+Description: AppArmor is active and enforcing
+
+--- Loaded Kernel Modules ---
+
+Total modules loaded: 87
+
+================================================================================
+8. LOG & AUDIT ANALYSIS
+================================================================================
+
+--- Audit Daemon Status ---
+
+[MEDIUM] Audit Daemon Not Running
+Description: auditd is not installed or not running
+Remediation: Install and enable: apt-get install auditd && systemctl enable --now auditd
+
+--- Log Files ---
+
+Log files present:
+  - /var/log/auth.log (OK)
+  - /var/log/syslog (OK)
+  - /var/log/kern.log (OK)
+
+--- Failed Login Attempts ---
+
+Failed SSH logins (last 24h): 127
+
+[MEDIUM] Multiple Failed Login Attempts
+Description: 127 failed SSH login attempts detected in last 24 hours
+Remediation: Install fail2ban: apt-get install fail2ban
+
+================================================================================
+9. FIREWALL & SECURITY TOOLS STATUS
+================================================================================
+
+--- Firewall Status ---
+
+[HIGH] Firewall Disabled
+Description: UFW firewall is not active
+Remediation: Enable firewall: ufw enable
+
+--- Security Tools ---
+
+fail2ban: Not installed
+rkhunter: Not installed
+aide: Not installed
+
+[MEDIUM] Security Tools Not Installed
+Description: Recommended security tools are not installed
+Remediation: Install: apt-get install fail2ban rkhunter aide
+
+================================================================================
+10. COMPLIANCE & BEST PRACTICES VALIDATION
+================================================================================
+
+--- CIS Benchmark Alignment ---
+
+[INFO] CIS Benchmark Review
+Description: Review system configuration against CIS Ubuntu 22.04 Benchmark
+
+--- Password Policy ---
+
+[MEDIUM] Weak Password Policy
+Description: Password complexity requirements not enforced
+Remediation: Configure PAM password requirements in /etc/pam.d/common-password
+
+================================================================================
+CVE REPORT
+================================================================================
+
+CVE SUMMARY
+===========
+Critical CVEs (CVSS 9.0-10.0): 1
+High CVEs (CVSS 7.0-8.9):      2
+Medium CVEs (CVSS 4.0-6.9):    1
+Low CVEs (CVSS 0.1-3.9):       0
+
+Total CVEs Detected: 4
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+SECURITY FINDINGS SUMMARY
+=========================
+Critical: 1
+High:     3
+Medium:   6
+Low:      1
+Info:     3
+
+Total Security Issues: 14
+
+CVE SUMMARY
+===========
+Critical CVEs (CVSS 9.0-10.0): 1
+High CVEs (CVSS 7.0-8.9):      2
+Medium CVEs (CVSS 4.0-6.9):    1
+Low CVEs (CVSS 0.1-3.9):       0
+
+Total CVEs Detected: 4
+
+RISK ASSESSMENT
+===============
+CRITICAL: Immediate action required!
+System has 1 critical findings and 1 critical CVEs.
+Critical CVEs with CVSS scores 9.0-10.0 require immediate patching!
+
+RECOMMENDATIONS
+===============
+1. URGENT: Patch 1 CRITICAL CVEs immediately
+   Run: /path/to/fix_critical_cves_20241109_143022.sh
+2. Address all CRITICAL security findings immediately
+3. Patch 2 HIGH severity CVEs within 24 hours
+4. Review and remediate HIGH severity findings within 24-48 hours
+5. Schedule patching for 1 MEDIUM CVEs within 1 week
+6. Schedule remediation for MEDIUM severity findings within 1 week
+7. Enable automatic security updates
+8. Implement regular security audit schedule (monthly recommended)
+9. Review and harden SSH configuration
+10. Enable and configure firewall (UFW)
+11. Install and configure intrusion detection (fail2ban)
+12. Enable audit logging (auditd)
+13. Regularly review system logs for suspicious activity
+14. Keep CVE remediation script for future use: /path/to/fix_critical_cves_20241109_143022.sh
+
+================================================================================
+  END OF REPORT
+================================================================================
