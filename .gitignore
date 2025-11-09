@@ -1,0 +1,26 @@
+# Security Audit Output Files
+security_audit_report_*.txt
+fix_critical_cves_*.sh
+
+# CVE Cache Directory
+.cve_cache/
+
+# Temporary Files
+*.tmp
+*.temp
+*.log
+
+# Editor Files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Backup Files
+*.bak
+*.backup
