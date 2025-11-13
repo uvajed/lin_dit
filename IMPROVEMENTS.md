@@ -337,5 +337,5 @@ The script now provides comprehensive security auditing across **14 phases** inc
 ---
 
 *Generated: 2025-11-13*
-*Improved by: AI Assistant*
-*Original Author: Elvis Ibrahimi*
+*Improved by: Claude Code*
+*Author: uvajed*

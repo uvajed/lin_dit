@@ -175,7 +175,7 @@ Free to use
 
 ## Author
 
-Elvis Ibrahimi - Security Audit Team
+uvajed - Claude Code
 
 ## Version
 

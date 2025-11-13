@@ -4,7 +4,7 @@
 # Version: 3.0.0
 # Description: Multi-distribution security audit tool with CVE detection and CVSS scoring
 # Supported OS: Ubuntu, Debian, RHEL, CentOS, Rocky Linux, AlmaLinux, Fedora, SUSE, openSUSE
-# Author: Elvis Ibrahimi - Security Audit Team
+# Author: uvajed - Claude Code
 # License: free to use
 #
 # Features:
