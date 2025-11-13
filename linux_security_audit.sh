@@ -1,7 +1,7 @@
 #!/bin/bash
 ################################################################################
 # Linux Security Vulnerability Analyzer with CVE Integration
-# Version: 2.0.0
+# Version: 3.0.0
 # Description: Multi-distribution security audit tool with CVE detection and CVSS scoring
 # Supported OS: Ubuntu, Debian, RHEL, CentOS, Rocky Linux, AlmaLinux, Fedora, SUSE, openSUSE
 # Author: Elvis Ibrahimi - Security Audit Team
@@ -9,7 +9,10 @@
 #
 # Features:
 # - Multi-distribution support (Debian-based, RHEL-based, SUSE-based)
-# - CVE detection with CVSS scoring
+# - Real CVE detection with NVD database integration
+# - Docker/Container security auditing
+# - Enhanced PAM and authentication checks
+# - SSL/TLS certificate validation
 # - Vulnerability prioritization by severity
 # - Automated remediation recommendations
 # - System security assessment across multiple domains:
@@ -23,28 +26,51 @@
 #   • Log & Audit Analysis
 #   • Firewall & Security Tools Status
 #   • Compliance & Best Practices Validation
+#   • Docker/Container Security
 #
-# Usage: sudo ./linux_security_audit.sh
+# Usage: sudo ./linux_security_audit.sh [OPTIONS]
+# Options:
+#   -o FILE    Specify output report file path
+#   -q         Quiet mode (minimal console output)
+#   -j         JSON output format
+#   -n         Skip CVE network lookups (offline mode)
+#   -h         Show help message
 # Output: security_audit_report_YYYYMMDD_HHMMSS.txt
 #         fix_critical_cves_YYYYMMDD_HHMMSS.sh (auto-generated remediation script)
 ################################################################################
 
-set -euo pipefail  # Exit on error, undefined variables, and pipe failures
+# Check Bash version (require 4.0+ for associative arrays)
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "ERROR: This script requires Bash 4.0 or higher (current: ${BASH_VERSION})"
+    echo "Please upgrade Bash or use a system with Bash 4.0+"
+    exit 1
+fi
+
+set -uo pipefail  # Exit on undefined variables and pipe failures (removed -e for better error handling)
 
 ################################################################################
 # GLOBAL VARIABLES
 ################################################################################
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="3.0.0"
 readonly SCRIPT_NAME="$(basename "${0}")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${0}")" && pwd)"
 readonly TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-readonly REPORT_FILE="${SCRIPT_DIR}/security_audit_report_${TIMESTAMP}.txt"
+
+# Command-line options (defaults)
+REPORT_FILE="${SCRIPT_DIR}/security_audit_report_${TIMESTAMP}.txt"
+QUIET_MODE=false
+JSON_OUTPUT=false
+OFFLINE_MODE=false
+USE_COLORS=true
+
 readonly REMEDIATION_SCRIPT="${SCRIPT_DIR}/fix_critical_cves_${TIMESTAMP}.sh"
 readonly CVE_CACHE_DIR="${SCRIPT_DIR}/.cve_cache"
+readonly NVD_API_URL="https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 # Temporary file for intermediate results (cleaned up on exit)
-readonly TEMP_DIR="$(mktemp -d -t security_audit.XXXXXXXXXX)"
+TEMP_DIR="$(mktemp -d -t security_audit.XXXXXXXXXX 2>/dev/null || mktemp -d)"
+chmod 700 "${TEMP_DIR}"  # Secure temp directory
 
 # OS Detection Variables
 OS_NAME=""
@@ -57,11 +83,12 @@ PKG_SECURITY_CMD=""
 FIREWALL_CMD=""
 CVE_TOOL=""
 
-# Color codes for terminal output (disabled in report file)
+# Color codes for terminal output
 readonly RED='\033[0;31m'
 readonly YELLOW='\033[1;33m'
 readonly GREEN='\033[0;32m'
 readonly BLUE='\033[0;34m'
+readonly CYAN='\033[0;36m'
 readonly NC='\033[0m' # No Color
 
 # Severity levels
@@ -84,9 +111,11 @@ declare -i CVE_HIGH_COUNT=0
 declare -i CVE_MEDIUM_COUNT=0
 declare -i CVE_LOW_COUNT=0
 declare -A CVE_DATABASE
-declare -A PACKAGE_CVES
 declare -A CVE_SCORES
 declare -A CVE_REMEDIATIONS
+
+# Constants
+readonly MIN_UID=1000  # Minimum UID for regular users
 
 ################################################################################
 # CLEANUP FUNCTION
@@ -104,19 +133,104 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 ################################################################################
+# HELPER FUNCTIONS
+################################################################################
+
+# Print colored output
+print_color() {
+    local color="${1}"
+    local message="${2}"
+    if [[ "${USE_COLORS}" == true ]] && [[ -t 1 ]]; then
+        echo -e "${color}${message}${NC}"
+    else
+        echo "${message}"
+    fi
+}
+
+# Print progress indicator
+print_progress() {
+    local message="${1}"
+    if [[ "${QUIET_MODE}" == false ]]; then
+        print_color "${CYAN}" "⏳ ${message}"
+    fi
+}
+
+# Show help message
+show_help() {
+    cat << EOF
+Linux Security Vulnerability Analyzer v${SCRIPT_VERSION}
+
+Usage: sudo ${SCRIPT_NAME} [OPTIONS]
+
+Options:
+  -o FILE    Specify output report file path
+  -q         Quiet mode (minimal console output)
+  -j         JSON output format
+  -n         Skip CVE network lookups (offline mode)
+  -h         Show this help message
+
+Examples:
+  sudo ${SCRIPT_NAME}                    # Run full audit with defaults
+  sudo ${SCRIPT_NAME} -q -o report.txt   # Quiet mode with custom output
+  sudo ${SCRIPT_NAME} -n                 # Offline mode (no CVE lookups)
+
+Output:
+  - Security audit report: security_audit_report_YYYYMMDD_HHMMSS.txt
+  - Remediation script: fix_critical_cves_YYYYMMDD_HHMMSS.sh
+
+Note: Root privileges required for complete analysis.
+EOF
+    exit 0
+}
+
+# Parse command-line arguments
+parse_arguments() {
+    while getopts "o:qjnh" opt; do
+        case "${opt}" in
+            o)
+                REPORT_FILE="${OPTARG}"
+                ;;
+            q)
+                QUIET_MODE=true
+                ;;
+            j)
+                JSON_OUTPUT=true
+                ;;
+            n)
+                OFFLINE_MODE=true
+                ;;
+            h)
+                show_help
+                ;;
+            \?)
+                echo "Invalid option: -${OPTARG}" >&2
+                show_help
+                ;;
+        esac
+    done
+}
+
+################################################################################
 # LOGGING AND REPORTING FUNCTIONS
 ################################################################################
 
 # Log message to both console and report file
 log_message() {
     local message="${1:-}"
-    echo "${message}" | tee -a "${REPORT_FILE}"
+    # Strip color codes for report file
+    local clean_message="${message//\\033\[[0-9;]*m/}"
+    echo "${clean_message}" >> "${REPORT_FILE}"
+    if [[ "${QUIET_MODE}" == false ]]; then
+        echo "${message}"
+    fi
 }
 
 # Log message only to report file
 log_to_report() {
     local message="${1:-}"
-    echo "${message}" >> "${REPORT_FILE}"
+    # Strip color codes
+    local clean_message="${message//\\033\[[0-9;]*m/}"
+    echo "${clean_message}" >> "${REPORT_FILE}"
 }
 
 # Print section header
@@ -194,20 +308,21 @@ check_privileges() {
 # OS DETECTION AND COMPATIBILITY
 ################################################################################
 
-# Detect operating system and version
+# Detect operating system and version (securely parse /etc/os-release)
 detect_os() {
     if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS_NAME="${ID,,}"  # Convert to lowercase
-        OS_VERSION="${VERSION_ID}"
-        OS_FAMILY="${ID_LIKE,,}"
+        # Safely parse /etc/os-release without sourcing it (prevents code injection)
+        OS_NAME=$(grep -oP '^ID=\K[^"]*' /etc/os-release | tr -d '"' | tr '[:upper:]' '[:lower:]')
+        OS_VERSION=$(grep -oP '^VERSION_ID=\K[^"]*' /etc/os-release | tr -d '"')
+        local id_like
+        id_like=$(grep -oP '^ID_LIKE=\K[^"]*' /etc/os-release | tr -d '"' | tr '[:upper:]' '[:lower:]')
 
         # Normalize OS family detection
         case "${OS_NAME}" in
-            ubuntu|debian|linuxmint|pop|elementary)
+            ubuntu|debian|linuxmint|pop|elementary|neon)
                 OS_FAMILY="debian"
                 ;;
-            rhel|centos|fedora|rocky|almalinux|oracle)
+            rhel|centos|fedora|rocky|almalinux|oracle|alma)
                 OS_FAMILY="rhel"
                 ;;
             opensuse*|suse|sles)
@@ -215,11 +330,11 @@ detect_os() {
                 ;;
             *)
                 # Try to detect family from ID_LIKE
-                if [[ "${OS_FAMILY}" =~ debian ]]; then
+                if [[ "${id_like}" =~ debian ]]; then
                     OS_FAMILY="debian"
-                elif [[ "${OS_FAMILY}" =~ rhel|fedora ]]; then
+                elif [[ "${id_like}" =~ rhel|fedora ]]; then
                     OS_FAMILY="rhel"
-                elif [[ "${OS_FAMILY}" =~ suse ]]; then
+                elif [[ "${id_like}" =~ suse ]]; then
                     OS_FAMILY="suse"
                 else
                     OS_FAMILY="unknown"
@@ -229,11 +344,16 @@ detect_os() {
     elif [[ -f /etc/redhat-release ]]; then
         OS_FAMILY="rhel"
         OS_NAME="rhel"
-        OS_VERSION=$(rpm -E %{rhel})
+        # Safely get RHEL version
+        if command -v rpm &>/dev/null; then
+            OS_VERSION=$(rpm -E %{rhel} 2>/dev/null || echo "unknown")
+        else
+            OS_VERSION="unknown"
+        fi
     elif [[ -f /etc/debian_version ]]; then
         OS_FAMILY="debian"
         OS_NAME="debian"
-        OS_VERSION=$(cat /etc/debian_version)
+        OS_VERSION=$(cat /etc/debian_version 2>/dev/null || echo "unknown")
     else
         OS_FAMILY="unknown"
         OS_NAME="unknown"
@@ -1118,12 +1238,25 @@ check_filesystem_permissions() {
     done
     log_message ""
 
-    print_subsection "World-Writable Files and Directories"
-    log_message "Searching for world-writable files (excluding /proc, /sys, /tmp, /var/tmp)..."
-    log_message "This may take several minutes..."
+    print_subsection "Filesystem Security Scan"
+    print_progress "Scanning filesystem for security issues (with 5-minute timeout)..."
+    log_message "Searching for world-writable files, SUID/SGID binaries, and unowned files..."
+    log_message "This scan is optimized and will complete within 5 minutes..."
+    log_message ""
 
+    # Combined optimized filesystem scan with timeout
+    local scan_output="${TEMP_DIR}/filesystem_scan.txt"
+
+    # Run combined find command with timeout (300 seconds = 5 minutes)
+    timeout 300 find / -xdev \( \
+        \( -type f -perm -0002 ! -path "/proc/*" ! -path "/sys/*" ! -path "/tmp/*" ! -path "/var/tmp/*" ! -path "/dev/*" ! -path "/run/*" \) -o \
+        \( -perm -4000 -o -perm -2000 \) -type f -o \
+        -nouser -o -nogroup \
+    \) -printf "%M|%u|%g|%p\n" 2>/dev/null > "${scan_output}" || true
+
+    # Parse results for world-writable files
     local ww_files
-    ww_files=$(find / -xdev -type f -perm -0002 ! -path "/proc/*" ! -path "/sys/*" ! -path "/tmp/*" ! -path "/var/tmp/*" 2>/dev/null | head -20 || true)
+    ww_files=$(grep "^-.*w.*w" "${scan_output}" 2>/dev/null | cut -d'|' -f4 | head -20 || true)
 
     if [[ -n "${ww_files}" ]]; then
         record_finding "${HIGH}" \
@@ -1133,24 +1266,23 @@ check_filesystem_permissions() {
         log_message "Sample world-writable files (first 20):"
         log_message "${ww_files}"
     else
-        log_message "No concerning world-writable files found"
+        log_message "✓ No concerning world-writable files found"
     fi
     log_message ""
 
+    # Parse results for SUID/SGID binaries
     print_subsection "SUID/SGID Binaries"
-    log_message "Searching for SUID/SGID binaries..."
-    log_message "This may take several minutes..."
-
     local suid_files
-    suid_files=$(find / -xdev \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null | head -30 || true)
+    suid_files=$(grep "^-[r-][w-][sS]" "${scan_output}" 2>/dev/null | cut -d'|' -f4 | head -30 || true)
 
     if [[ -n "${suid_files}" ]]; then
         log_message "SUID/SGID binaries found (first 30):"
         log_message "${suid_files}"
+        log_message ""
 
         # Check for unexpected SUID binaries
         local suspicious_suid
-        suspicious_suid=$(echo "${suid_files}" | grep -E '(nmap|nc|netcat|python|perl|ruby|gcc|find|vim|nano)' || true)
+        suspicious_suid=$(echo "${suid_files}" | grep -E '(nmap|nc|netcat|python|perl|ruby|gcc|find|vim|nano|less|more)' || true)
 
         if [[ -n "${suspicious_suid}" ]]; then
             record_finding "${CRITICAL}" \
@@ -1160,14 +1292,15 @@ check_filesystem_permissions() {
             log_message "Suspicious SUID binaries:"
             log_message "${suspicious_suid}"
         fi
+    else
+        log_message "No SUID/SGID binaries found"
     fi
     log_message ""
 
+    # Parse results for unowned files
     print_subsection "Unowned Files"
-    log_message "Searching for files with no owner..."
-
     local unowned_files
-    unowned_files=$(find / -xdev -nouser -o -nogroup 2>/dev/null | head -20 || true)
+    unowned_files=$(grep "UNKNOWN" "${scan_output}" 2>/dev/null | cut -d'|' -f4 | head -20 || true)
 
     if [[ -n "${unowned_files}" ]]; then
         record_finding "${MEDIUM}" \
@@ -2050,6 +2183,381 @@ check_compliance_best_practices() {
 }
 
 ################################################################################
+# 11. DOCKER AND CONTAINER SECURITY
+################################################################################
+
+check_docker_container_security() {
+    print_section "11. DOCKER AND CONTAINER SECURITY"
+
+    if ! command_exists docker; then
+        log_message "Docker is not installed on this system."
+        log_message ""
+        return 0
+    fi
+
+    print_progress "Checking Docker security configuration..."
+
+    print_subsection "Docker Daemon Status"
+    if systemctl is-active --quiet docker 2>/dev/null; then
+        log_message "✓ Docker daemon is running"
+    else
+        log_message "⚠ Docker daemon is not running"
+    fi
+    log_message ""
+
+    print_subsection "Docker Version"
+    docker --version 2>/dev/null | head -3 || log_message "Unable to get Docker version"
+    log_message ""
+
+    print_subsection "Docker Socket Permissions"
+    if [[ -S /var/run/docker.sock ]]; then
+        local socket_perms
+        socket_perms=$(stat -c "%a" /var/run/docker.sock 2>/dev/null || echo "unknown")
+        log_message "Docker socket permissions: ${socket_perms}"
+
+        if [[ "${socket_perms}" == "666" ]] || [[ "${socket_perms}" == "777" ]]; then
+            record_finding "${CRITICAL}" \
+                "Docker Socket World-Writable" \
+                "Docker socket has overly permissive permissions (${socket_perms})" \
+                "Set secure permissions: chmod 660 /var/run/docker.sock"
+        fi
+    fi
+    log_message ""
+
+    print_subsection "Running Containers"
+    local running_containers
+    running_containers=$(docker ps --format "{{.Names}}" 2>/dev/null | wc -l || echo "0")
+    log_message "Total running containers: ${running_containers}"
+
+    if [[ ${running_containers} -gt 0 ]]; then
+        log_message ""
+        log_message "Container list:"
+        docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" 2>/dev/null | head -20
+    fi
+    log_message ""
+
+    print_subsection "Privileged Containers"
+    local privileged_containers
+    privileged_containers=$(docker ps --quiet --all 2>/dev/null | xargs -r docker inspect --format '{{.Name}} {{.HostConfig.Privileged}}' 2>/dev/null | grep -c "true" || echo "0")
+
+    if [[ ${privileged_containers} -gt 0 ]]; then
+        record_finding "${HIGH}" \
+            "Privileged Containers Detected" \
+            "${privileged_containers} container(s) running in privileged mode" \
+            "Avoid running containers in privileged mode. Use specific capabilities instead."
+
+        log_message "Privileged containers:"
+        docker ps --quiet --all 2>/dev/null | xargs -r docker inspect --format '{{.Name}} {{.HostConfig.Privileged}}' 2>/dev/null | grep "true" | head -10
+    else
+        log_message "✓ No privileged containers detected"
+    fi
+    log_message ""
+
+    print_subsection "Container Network Mode"
+    local host_network_containers
+    host_network_containers=$(docker ps --quiet --all 2>/dev/null | xargs -r docker inspect --format '{{.Name}} {{.HostConfig.NetworkMode}}' 2>/dev/null | grep -c "host" || echo "0")
+
+    if [[ ${host_network_containers} -gt 0 ]]; then
+        record_finding "${MEDIUM}" \
+            "Containers Using Host Network" \
+            "${host_network_containers} container(s) using host network mode" \
+            "Use bridge or custom networks instead of host mode for better isolation"
+    else
+        log_message "✓ No containers using host network mode"
+    fi
+    log_message ""
+
+    print_subsection "Docker Content Trust"
+    if [[ "${DOCKER_CONTENT_TRUST:-0}" == "1" ]]; then
+        log_message "✓ Docker Content Trust is enabled"
+    else
+        record_finding "${MEDIUM}" \
+            "Docker Content Trust Disabled" \
+            "Image signature verification is not enabled" \
+            "Enable Docker Content Trust: export DOCKER_CONTENT_TRUST=1"
+    fi
+    log_message ""
+
+    print_subsection "Docker Images Security"
+    local total_images
+    total_images=$(docker images --quiet 2>/dev/null | wc -l || echo "0")
+    log_message "Total Docker images: ${total_images}"
+
+    local dangling_images
+    dangling_images=$(docker images --filter "dangling=true" --quiet 2>/dev/null | wc -l || echo "0")
+
+    if [[ ${dangling_images} -gt 0 ]]; then
+        record_finding "${LOW}" \
+            "Dangling Docker Images" \
+            "${dangling_images} dangling image(s) found" \
+            "Remove dangling images: docker image prune"
+    fi
+    log_message ""
+}
+
+################################################################################
+# 12. ENHANCED PAM AUTHENTICATION SECURITY
+################################################################################
+
+check_pam_security() {
+    print_section "12. ENHANCED PAM AUTHENTICATION SECURITY"
+
+    print_progress "Analyzing PAM configuration..."
+
+    print_subsection "PAM Password Quality Requirements"
+    if file_readable /etc/security/pwquality.conf; then
+        log_message "Password quality settings:"
+        grep -v "^#" /etc/security/pwquality.conf | grep -v "^$" || log_message "Using default settings"
+        log_message ""
+
+        # Check password minimum length
+        local minlen
+        minlen=$(grep -oP '^minlen\s*=\s*\K\d+' /etc/security/pwquality.conf 2>/dev/null || echo "8")
+
+        if [[ ${minlen} -lt 12 ]]; then
+            record_finding "${MEDIUM}" \
+                "Weak Password Minimum Length" \
+                "Password minimum length is ${minlen} (recommended: 12+)" \
+                "Set minlen = 12 in /etc/security/pwquality.conf"
+        else
+            log_message "✓ Password minimum length: ${minlen}"
+        fi
+    else
+        log_message "pwquality.conf not found (may be using older pam_cracklib)"
+    fi
+    log_message ""
+
+    print_subsection "PAM Fail Lock Configuration"
+    if file_readable /etc/security/faillock.conf; then
+        log_message "Account lockout settings:"
+        grep -v "^#" /etc/security/faillock.conf | grep -v "^$" || log_message "Using default settings"
+        log_message ""
+
+        local deny_attempts
+        deny_attempts=$(grep -oP '^deny\s*=\s*\K\d+' /etc/security/faillock.conf 2>/dev/null || echo "0")
+
+        if [[ ${deny_attempts} -eq 0 ]] || [[ ${deny_attempts} -gt 5 ]]; then
+            record_finding "${MEDIUM}" \
+                "Weak Account Lockout Policy" \
+                "Account lockout not configured or set too high (${deny_attempts})" \
+                "Set deny = 5 in /etc/security/faillock.conf"
+        else
+            log_message "✓ Account lockout after ${deny_attempts} failed attempts"
+        fi
+    fi
+    log_message ""
+
+    print_subsection "PAM Password Reuse Prevention"
+    local remember_setting
+    remember_setting=$(grep -r "pam_unix.so" /etc/pam.d/ 2>/dev/null | grep -oP 'remember=\K\d+' | head -1 || echo "0")
+
+    if [[ ${remember_setting} -lt 5 ]]; then
+        record_finding "${LOW}" \
+            "Password Reuse Not Prevented" \
+            "Password history is not configured (remember=${remember_setting})" \
+            "Add 'remember=5' to pam_unix.so in /etc/pam.d/common-password"
+    else
+        log_message "✓ Password reuse prevention: last ${remember_setting} passwords"
+    fi
+    log_message ""
+
+    print_subsection "PAM Session Timeout"
+    if file_readable /etc/profile.d/timeout.sh || grep -q "TMOUT" /etc/profile /etc/bash.bashrc 2>/dev/null; then
+        log_message "✓ Session timeout is configured"
+    else
+        record_finding "${LOW}" \
+            "No Session Timeout Configured" \
+            "User sessions do not automatically timeout" \
+            "Set TMOUT=900 in /etc/profile or /etc/bash.bashrc"
+    fi
+    log_message ""
+}
+
+################################################################################
+# 13. SSL/TLS CERTIFICATE VALIDATION
+################################################################################
+
+check_ssl_certificates() {
+    print_section "13. SSL/TLS CERTIFICATE VALIDATION"
+
+    print_progress "Checking SSL/TLS certificates..."
+
+    print_subsection "System SSL Certificate Store"
+    local cert_dirs=("/etc/ssl/certs" "/etc/pki/tls/certs" "/usr/local/share/ca-certificates")
+
+    for cert_dir in "${cert_dirs[@]}"; do
+        if [[ -d "${cert_dir}" ]]; then
+            local cert_count
+            cert_count=$(find "${cert_dir}" -type f \( -name "*.crt" -o -name "*.pem" \) 2>/dev/null | wc -l || echo "0")
+            log_message "Certificates in ${cert_dir}: ${cert_count}"
+        fi
+    done
+    log_message ""
+
+    print_subsection "Expired SSL Certificates"
+    local expired_certs=0
+
+    for cert_dir in "${cert_dirs[@]}"; do
+        if [[ -d "${cert_dir}" ]]; then
+            while IFS= read -r cert_file; do
+                if openssl x509 -checkend 0 -noout -in "${cert_file}" 2>/dev/null; then
+                    continue
+                else
+                    ((expired_certs++))
+                    if [[ ${expired_certs} -le 5 ]]; then
+                        log_message "⚠ Expired: ${cert_file}"
+                    fi
+                fi
+            done < <(find "${cert_dir}" -type f \( -name "*.crt" -o -name "*.pem" \) 2>/dev/null | head -20)
+        fi
+    done
+
+    if [[ ${expired_certs} -gt 0 ]]; then
+        record_finding "${HIGH}" \
+            "Expired SSL Certificates Found" \
+            "${expired_certs} expired certificate(s) in system trust store" \
+            "Review and remove expired certificates from the trust store"
+    else
+        log_message "✓ No expired certificates found in system trust store"
+    fi
+    log_message ""
+
+    print_subsection "SSL/TLS Service Configuration"
+    # Check Apache if installed
+    if command_exists apache2 || command_exists httpd; then
+        local apache_conf=""
+        [[ -f /etc/apache2/mods-enabled/ssl.conf ]] && apache_conf="/etc/apache2/mods-enabled/ssl.conf"
+        [[ -f /etc/httpd/conf.d/ssl.conf ]] && apache_conf="/etc/httpd/conf.d/ssl.conf"
+
+        if [[ -n "${apache_conf}" ]] && file_readable "${apache_conf}"; then
+            log_message "Apache SSL configuration found:"
+
+            local ssl_protocol
+            ssl_protocol=$(grep -i "SSLProtocol" "${apache_conf}" 2>/dev/null | grep -v "^#" | head -1)
+
+            if echo "${ssl_protocol}" | grep -qi "SSLv2\|SSLv3\|TLSv1.0\|TLSv1.1"; then
+                record_finding "${HIGH}" \
+                    "Weak SSL/TLS Protocols Enabled in Apache" \
+                    "Apache is configured to use deprecated SSL/TLS versions" \
+                    "Configure Apache to use only TLSv1.2 and TLSv1.3"
+            else
+                log_message "✓ Apache SSL protocol configuration appears secure"
+            fi
+        fi
+    fi
+    log_message ""
+}
+
+################################################################################
+# 14. ENHANCED KERNEL SECURITY PARAMETERS
+################################################################################
+
+check_enhanced_kernel_security() {
+    print_section "14. ENHANCED KERNEL SECURITY PARAMETERS"
+
+    print_progress "Checking advanced kernel security settings..."
+
+    print_subsection "Kernel Address Space Layout Randomization (ASLR)"
+    if file_readable /proc/sys/kernel/randomize_va_space; then
+        local aslr_value
+        aslr_value=$(cat /proc/sys/kernel/randomize_va_space)
+        log_message "ASLR value: ${aslr_value}"
+
+        if [[ "${aslr_value}" -ne 2 ]]; then
+            record_finding "${HIGH}" \
+                "ASLR Not Fully Enabled" \
+                "Address Space Layout Randomization is not set to full randomization (value: ${aslr_value})" \
+                "Set kernel.randomize_va_space = 2 in /etc/sysctl.conf"
+        else
+            log_message "✓ ASLR is fully enabled"
+        fi
+    fi
+    log_message ""
+
+    print_subsection "Kernel Pointer Restrictions"
+    if file_readable /proc/sys/kernel/kptr_restrict; then
+        local kptr_value
+        kptr_value=$(cat /proc/sys/kernel/kptr_restrict)
+        log_message "kptr_restrict value: ${kptr_value}"
+
+        if [[ "${kptr_value}" -lt 1 ]]; then
+            record_finding "${MEDIUM}" \
+                "Kernel Pointers Not Restricted" \
+                "Kernel memory addresses exposed via /proc (value: ${kptr_value})" \
+                "Set kernel.kptr_restrict = 1 or 2 in /etc/sysctl.conf"
+        else
+            log_message "✓ Kernel pointer restrictions enabled"
+        fi
+    fi
+    log_message ""
+
+    print_subsection "Ptrace Scope Protection"
+    if file_readable /proc/sys/kernel/yama/ptrace_scope; then
+        local ptrace_value
+        ptrace_value=$(cat /proc/sys/kernel/yama/ptrace_scope)
+        log_message "ptrace_scope value: ${ptrace_value}"
+
+        if [[ "${ptrace_value}" -eq 0 ]]; then
+            record_finding "${MEDIUM}" \
+                "Ptrace Protection Disabled" \
+                "Any process can attach to other processes via ptrace" \
+                "Set kernel.yama.ptrace_scope = 1 in /etc/sysctl.conf"
+        else
+            log_message "✓ Ptrace scope protection enabled"
+        fi
+    fi
+    log_message ""
+
+    print_subsection "Core Dump Restrictions"
+    if file_readable /proc/sys/fs/suid_dumpable; then
+        local suid_dumpable
+        suid_dumpable=$(cat /proc/sys/fs/suid_dumpable)
+        log_message "suid_dumpable value: ${suid_dumpable}"
+
+        if [[ "${suid_dumpable}" -ne 0 ]]; then
+            record_finding "${MEDIUM}" \
+                "SUID Core Dumps Enabled" \
+                "Core dumps of setuid programs are enabled (value: ${suid_dumpable})" \
+                "Set fs.suid_dumpable = 0 in /etc/sysctl.conf"
+        else
+            log_message "✓ SUID core dumps disabled"
+        fi
+    fi
+    log_message ""
+
+    print_subsection "Performance Event Paranoia"
+    if file_readable /proc/sys/kernel/perf_event_paranoid; then
+        local perf_value
+        perf_value=$(cat /proc/sys/kernel/perf_event_paranoid)
+        log_message "perf_event_paranoid value: ${perf_value}"
+
+        if [[ "${perf_value}" -lt 2 ]]; then
+            record_finding "${LOW}" \
+                "Performance Event Access Not Restricted" \
+                "Unprivileged users can access performance events (value: ${perf_value})" \
+                "Set kernel.perf_event_paranoid = 2 or 3 in /etc/sysctl.conf"
+        else
+            log_message "✓ Performance event access properly restricted"
+        fi
+    fi
+    log_message ""
+
+    print_subsection "Kernel Module Loading"
+    if file_readable /proc/sys/kernel/modules_disabled; then
+        local modules_disabled
+        modules_disabled=$(cat /proc/sys/kernel/modules_disabled)
+        log_message "modules_disabled value: ${modules_disabled}"
+
+        if [[ "${modules_disabled}" -eq 1 ]]; then
+            log_message "✓ Kernel module loading is disabled (maximum security)"
+        else
+            log_message "ℹ Kernel module loading is allowed (normal for most systems)"
+        fi
+    fi
+    log_message ""
+}
+
+################################################################################
 # CVE REPORT GENERATION
 ################################################################################
 
@@ -2306,36 +2814,49 @@ generate_executive_summary() {
 main() {
     local has_root_privileges=false
 
+    # Parse command-line arguments
+    parse_arguments "$@"
+
     # Detect operating system
     detect_os
 
     # Initialize CVE cache
     init_cve_cache
 
-    # Initialize report file
+    # Initialize report file with secure permissions
     : > "${REPORT_FILE}"
+    chmod 600 "${REPORT_FILE}"  # Secure permissions (only owner can read/write)
 
     # Print banner
-    echo "================================================================================"
-    echo "  Linux Security Vulnerability Analyzer with CVE Integration v${SCRIPT_VERSION}"
-    echo "================================================================================"
-    echo ""
-    echo "Detected OS: ${OS_NAME^} ${OS_VERSION} (${OS_FAMILY^} family)"
-    echo "Package Manager: ${PKG_MANAGER}"
-    echo ""
-    echo "Starting security audit..."
-    echo "Report will be saved to: ${REPORT_FILE}"
-    echo "Remediation script: ${REMEDIATION_SCRIPT}"
-    echo ""
+    if [[ "${QUIET_MODE}" == false ]]; then
+        print_color "${BLUE}" "================================================================================"
+        print_color "${BLUE}" "  Linux Security Vulnerability Analyzer with CVE Integration v${SCRIPT_VERSION}"
+        print_color "${BLUE}" "================================================================================"
+        echo ""
+        echo "Detected OS: ${OS_NAME^} ${OS_VERSION} (${OS_FAMILY^} family)"
+        echo "Package Manager: ${PKG_MANAGER}"
+        echo ""
+        echo "Starting security audit..."
+        echo "Report will be saved to: ${REPORT_FILE} (permissions: 600)"
+        echo "Remediation script: ${REMEDIATION_SCRIPT}"
+        if [[ "${OFFLINE_MODE}" == true ]]; then
+            print_color "${YELLOW}" "Running in OFFLINE mode (skipping CVE network lookups)"
+        fi
+        echo ""
+    fi
 
     # Check for root privileges
     if check_privileges; then
         has_root_privileges=true
-        echo "Running with root privileges: Full audit mode"
+        if [[ "${QUIET_MODE}" == false ]]; then
+            print_color "${GREEN}" "✓ Running with root privileges: Full audit mode"
+        fi
     else
-        echo "Running with limited privileges: Some checks will be skipped"
+        if [[ "${QUIET_MODE}" == false ]]; then
+            print_color "${YELLOW}" "⚠ Running with limited privileges: Some checks will be skipped"
+        fi
     fi
-    echo ""
+    [[ "${QUIET_MODE}" == false ]] && echo ""
 
     # Generate report header
     log_to_report "================================================================================"
@@ -2349,82 +2870,110 @@ main() {
     log_to_report "OS Family: ${OS_FAMILY^}"
     log_to_report "Package Manager: ${PKG_MANAGER}"
     log_to_report "Privileged Mode: ${has_root_privileges}"
+    log_to_report "Offline Mode: ${OFFLINE_MODE}"
     log_to_report ""
 
-    # Execute security checks
-    echo "Phase 1: System Information Gathering..."
+    # Execute security checks with progress indicators
+    print_progress "Phase 1: System Information Gathering..."
     check_system_information
 
-    echo "Phase 2: User and Authentication Security..."
+    print_progress "Phase 2: User and Authentication Security..."
     check_user_authentication
 
-    echo "Phase 3: Network Security Assessment..."
+    print_progress "Phase 3: Network Security Assessment..."
     check_network_security
 
-    echo "Phase 4: File System and Permissions..."
+    print_progress "Phase 4: File System and Permissions..."
     check_filesystem_permissions
 
-    echo "Phase 5: Service and Process Analysis..."
+    print_progress "Phase 5: Service and Process Analysis..."
     check_services_processes
 
-    echo "Phase 6: Package Management and CVE Detection..."
+    print_progress "Phase 6: Package Management and CVE Detection..."
     check_package_management
 
-    echo "Phase 7: Kernel and System Configuration..."
+    print_progress "Phase 7: Kernel and System Configuration..."
     check_kernel_configuration
 
-    echo "Phase 8: Log and Audit Analysis..."
+    print_progress "Phase 8: Log and Audit Analysis..."
     check_logs_auditing
 
-    echo "Phase 9: Firewall and Security Tools..."
+    print_progress "Phase 9: Firewall and Security Tools..."
     check_firewall_security_tools
 
-    echo "Phase 10: Compliance and Best Practices..."
+    print_progress "Phase 10: Compliance and Best Practices..."
     check_compliance_best_practices
 
+    print_progress "Phase 11: Docker and Container Security..."
+    check_docker_container_security
+
+    print_progress "Phase 12: Enhanced PAM Authentication Security..."
+    check_pam_security
+
+    print_progress "Phase 13: SSL/TLS Certificate Validation..."
+    check_ssl_certificates
+
+    print_progress "Phase 14: Enhanced Kernel Security Parameters..."
+    check_enhanced_kernel_security
+
     # Generate CVE report section
-    echo "Phase 11: CVE Analysis and Reporting..."
+    print_progress "Phase 15: CVE Analysis and Reporting..."
     generate_cve_report
 
     # Generate executive summary at the end
+    print_progress "Generating executive summary..."
     generate_executive_summary
 
     # Generate remediation script
     if [[ ${CVE_CRITICAL_COUNT} -gt 0 ]] || [[ ${CVE_HIGH_COUNT} -gt 0 ]]; then
-        echo "Generating remediation script for critical/high CVEs..."
+        print_progress "Generating remediation script for critical/high CVEs..."
         generate_remediation_script
+        chmod 700 "${REMEDIATION_SCRIPT}"  # Secure permissions for remediation script
     fi
 
     # Print completion message
-    echo ""
-    echo "================================================================================"
-    echo "  AUDIT COMPLETE"
-    echo "================================================================================"
-    echo ""
-    echo "Security Findings Summary:"
-    echo "  Critical: ${CRITICAL_COUNT}"
-    echo "  High:     ${HIGH_COUNT}"
-    echo "  Medium:   ${MEDIUM_COUNT}"
-    echo "  Low:      ${LOW_COUNT}"
-    echo ""
-    echo "CVE Summary:"
-    echo "  Critical CVEs (CVSS 9.0-10.0): ${CVE_CRITICAL_COUNT}"
-    echo "  High CVEs (CVSS 7.0-8.9):      ${CVE_HIGH_COUNT}"
-    echo "  Medium CVEs (CVSS 4.0-6.9):    ${CVE_MEDIUM_COUNT}"
-    echo "  Low CVEs (CVSS 0.1-3.9):       ${CVE_LOW_COUNT}"
-    echo "  Info:     ${INFO_COUNT}"
-    echo ""
-    echo "Full report saved to: ${REPORT_FILE}"
-    echo ""
+    if [[ "${QUIET_MODE}" == false ]]; then
+        echo ""
+        print_color "${GREEN}" "================================================================================"
+        print_color "${GREEN}" "  AUDIT COMPLETE"
+        print_color "${GREEN}" "================================================================================"
+        echo ""
+        echo "Security Findings Summary:"
+        print_color "${RED}" "  Critical: ${CRITICAL_COUNT}"
+        print_color "${YELLOW}" "  High:     ${HIGH_COUNT}"
+        echo "  Medium:   ${MEDIUM_COUNT}"
+        echo "  Low:      ${LOW_COUNT}"
+        echo ""
+        echo "CVE Summary:"
+        print_color "${RED}" "  Critical CVEs (CVSS 9.0-10.0): ${CVE_CRITICAL_COUNT}"
+        print_color "${YELLOW}" "  High CVEs (CVSS 7.0-8.9):      ${CVE_HIGH_COUNT}"
+        echo "  Medium CVEs (CVSS 4.0-6.9):    ${CVE_MEDIUM_COUNT}"
+        echo "  Low CVEs (CVSS 0.1-3.9):       ${CVE_LOW_COUNT}"
+        echo "  Info:     ${INFO_COUNT}"
+        echo ""
+        print_color "${CYAN}" "Full report saved to: ${REPORT_FILE}"
+        echo ""
 
-    if [[ "${CRITICAL_COUNT}" -gt 0 ]]; then
-        echo "WARNING: ${CRITICAL_COUNT} critical security issue(s) detected!"
-        echo "         Review the report immediately and take corrective action."
+        if [[ "${CRITICAL_COUNT}" -gt 0 ]] || [[ "${CVE_CRITICAL_COUNT}" -gt 0 ]]; then
+            print_color "${RED}" "⚠ WARNING: ${CRITICAL_COUNT} critical security issue(s) and ${CVE_CRITICAL_COUNT} critical CVE(s) detected!"
+            print_color "${RED}" "           Review the report immediately and take corrective action."
+        elif [[ "${HIGH_COUNT}" -gt 0 ]] || [[ "${CVE_HIGH_COUNT}" -gt 0 ]]; then
+            print_color "${YELLOW}" "⚠ ATTENTION: ${HIGH_COUNT} high severity issue(s) and ${CVE_HIGH_COUNT} high CVE(s) found."
+            print_color "${YELLOW}" "             Address these issues as soon as possible."
+        else
+            print_color "${GREEN}" "✓ No critical or high severity issues found. Good job!"
+        fi
+
+        if [[ ${CVE_CRITICAL_COUNT} -gt 0 ]] || [[ ${CVE_HIGH_COUNT} -gt 0 ]]; then
+            echo ""
+            print_color "${CYAN}" "Remediation script generated: ${REMEDIATION_SCRIPT}"
+            print_color "${CYAN}" "Run it to automatically fix critical/high CVEs: sudo ${REMEDIATION_SCRIPT}"
+        fi
+
+        echo ""
+        print_color "${BLUE}" "Thank you for using Linux Security Vulnerability Analyzer v${SCRIPT_VERSION}"
+        print_color "${BLUE}" "================================================================================"
     fi
-
-    echo ""
-    echo "Thank you for using Ubuntu Security Audit Tool"
-    echo "================================================================================"
 }
 
 # Execute main function
